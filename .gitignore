@@ -1,7 +1,48 @@
-.idea/*
-build/*
-.gradle/*
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
 gradle.properties
+
+main.kt
+
+local.properties
+
+# IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Maven
+target/
+
+# Kotlin
+.kotlin/
+captures/
+
+# Binaries
+bin/
+out/
+
+# Secrets
 secring.gpg
 signing.gpg
-main.kt
+*.jks
+
+# Log files
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.swo

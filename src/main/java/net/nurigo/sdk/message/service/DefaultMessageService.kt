@@ -1,54 +1,67 @@
 package net.nurigo.sdk.message.service
 
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
-import kotlinx.datetime.Instant
-import kotlinx.datetime.toKotlinInstant
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
 import net.nurigo.sdk.message.exception.*
 import net.nurigo.sdk.message.lib.Authenticator
+import net.nurigo.sdk.message.lib.JsonSupport
 import net.nurigo.sdk.message.lib.MapHelper
+import net.nurigo.sdk.message.lib.addMessageListParameterToCriteria
+import net.nurigo.sdk.message.lib.handleErrorResponse
+import net.nurigo.sdk.message.lib.processSendRequest
 import net.nurigo.sdk.message.model.*
-import net.nurigo.sdk.message.request.*
-import net.nurigo.sdk.message.response.*
-import net.nurigo.sdk.message.response.ErrorResponse
+import net.nurigo.sdk.message.dto.request.FileUploadRequest
+import net.nurigo.sdk.message.dto.request.MessageListBaseRequest
+import net.nurigo.sdk.message.dto.request.MessageListRequest
+import net.nurigo.sdk.message.dto.request.MultipleDetailMessageSendingRequest
+import net.nurigo.sdk.message.dto.request.SendRequestConfig
+import net.nurigo.sdk.message.dto.request.kakao.KakaoAlimtalkSendableTemplateListRequest
+import net.nurigo.sdk.message.dto.request.kakao.KakaoAlimtalkTemplateMutationRequest
+import net.nurigo.sdk.message.dto.request.kakao.KakaoAlimtalkTemplateListRequest
+import net.nurigo.sdk.message.dto.request.kakao.KakaoAlimtalkTemplateUpdateNameRequest
+import net.nurigo.sdk.message.dto.request.kakao.KakaoBrandMessageTemplateListRequest
+import net.nurigo.sdk.message.dto.response.ErrorResponse
+import net.nurigo.sdk.message.dto.response.MessageListResponse
+import net.nurigo.sdk.message.dto.response.MultipleDetailMessageSentResponse
+import net.nurigo.sdk.message.dto.response.kakao.KakaoAlimtalkTemplateListResponse
+import net.nurigo.sdk.message.dto.response.kakao.KakaoAlimtalkTemplateResponse
+import net.nurigo.sdk.message.dto.response.kakao.KakaoBrandMessageTemplateListResponse
+import net.nurigo.sdk.message.lib.handleApiResponse
+import net.nurigo.sdk.message.model.kakao.KakaoAlimtalkTemplateCategory
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.apache.commons.codec.binary.Base64
 import retrofit2.Retrofit
+import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.io.File
 import java.io.FileInputStream
 
-@OptIn(ExperimentalSerializationApi::class)
 class DefaultMessageService(apiKey: String, apiSecretKey: String, domain: String) : MessageService {
     private var messageHttpService: MessageHttpService
 
     init {
-        val client = OkHttpClient.Builder().addInterceptor { chain ->
-            val authInfo = Authenticator(apiKey, apiSecretKey).generateAuthInfo()
-            val request: Request = chain.request().newBuilder().addHeader("Authorization", authInfo).build()
-            chain.proceed(request)
-        }.build()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(50, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(50, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(50, java.util.concurrent.TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val authInfo = Authenticator(apiKey, apiSecretKey).generateAuthInfo()
+                val request: Request = chain.request().newBuilder().addHeader("Authorization", authInfo).build()
+                chain.proceed(request)
+            }.build()
         val contentType = "application/json".toMediaType()
-        val jsonConfig = Json {
-            coerceInputValues = true
-            explicitNulls = false
-            encodeDefaults = true
-            ignoreUnknownKeys = true
-        }
 
         messageHttpService =
-            Retrofit.Builder().baseUrl(domain).addConverterFactory(jsonConfig.asConverterFactory(contentType))
+            Retrofit.Builder().baseUrl(domain).addConverterFactory(JsonSupport.json.asConverterFactory(contentType))
                 .client(client).build().create(MessageHttpService::class.java)
     }
 
+
     /**
-     * 파일 업로드 API
-     * @suppress 파일을 접근 가능한 경로로 입력하셔야 합니다.
+     * 파일 업로드 메소드
+     * 파일을 접근 가능한 경로로 입력하셔야 합니다.
      * */
     @Throws
+    @JvmOverloads
     fun uploadFile(file: File, fileType: StorageType = StorageType.MMS, link: String? = null): String? {
         val length = file.length()
         val imageByte = ByteArray(length.toInt())
@@ -67,661 +80,258 @@ class DefaultMessageService(apiKey: String, apiSecretKey: String, domain: String
         if (response.isSuccessful) {
             return response.body()?.fileId
         } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            throw NurigoFileUploadException(errorResponse.errorMessage)
+            // 파일 업로드는 특별한 예외를 던지므로 공통 에러 핸들러를 사용하지 않음
+            val errorResponse: ErrorResponse = JsonSupport.json.decodeFromString(response.errorBody()?.string() ?: "")
+            throw SolapiFileUploadException(errorResponse.errorMessage)
         }
     }
 
     /**
-     * 메시지 조회 API
+     * 메시지 조회 메소드
      */
-    fun getMessageList(): MessageListResponse? {
-        val response = this.messageHttpService.getMessageList(emptyMap()).execute()
+    @JvmOverloads
+    fun getMessageList(parameter: MessageListRequest? = null): MessageListResponse? {
+        val payload = parameter?.let { it ->
+            val tempPayload = MessageListBaseRequest()
 
-        if (response.isSuccessful) {
-            return response.body()
-        } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
-        }
-    }
+            if (it.status != null && !it.statusCode.isNullOrBlank()) {
+                throw SolapiBadRequestException("status와 statusCode는 병기할 수 없습니다.")
+            }
 
-    /**
-     * 메시지 조회 API
-     * */
-    @Throws
-    fun getMessageList(parameter: MessageListRequest): MessageListResponse? {
-        val tempPayload = MessageListBaseRequest()
-        val payload = mutableMapOf<String, Any?>()
-        if (parameter.status != null && !parameter.statusCode.isNullOrBlank()) {
-            // TODO: i18n needed
-            throw NurigoBadRequestException("status와 statusCode는 병기할 수 없습니다.")
-        } else if (parameter.status != null) {
-            when (parameter.status) {
-                MessageStatusType.PENDING -> {
-                    tempPayload.criteria = "statusCode"
-                    tempPayload.cond = "eq"
-                    tempPayload.value = "2000"
+            it.status?.let { status ->
+                val (criteria, cond, value) = when (status) {
+                    MessageStatusType.PENDING -> Triple("statusCode", "eq", "2000")
+                    MessageStatusType.SENDING -> Triple("statusCode", "eq", "3000")
+                    MessageStatusType.COMPLETE -> Triple("statusCode", "eq", "4000")
+                    MessageStatusType.FAILED -> Triple(
+                        "statusCode,statusCode,statusCode",
+                        "ne,ne,ne",
+                        "2000,3000,4000"
+                    )
                 }
-
-                MessageStatusType.SENDING -> {
-                    tempPayload.criteria = "statusCode"
-                    tempPayload.cond = "eq"
-                    tempPayload.value = "3000"
-                }
-
-                MessageStatusType.COMPLETE -> {
-                    tempPayload.criteria = "statusCode"
-                    tempPayload.cond = "eq"
-                    tempPayload.value = "4000"
-                }
-
-                MessageStatusType.FAILED -> {
-                    tempPayload.criteria = "statusCode,statusCode,statusCode"
-                    tempPayload.cond = "ne,ne,ne"
-                    tempPayload.value = "2000,3000,4000"
-                }
-
-                else -> throw NurigoUnknownException("허용될 수 없는 status 값이 입력되었습니다.")
-            }
-        }
-
-        if (!parameter.messageIds.isNullOrEmpty()) {
-            var tempCriteria = ""
-            var tempCond = ""
-
-            parameter.messageIds?.forEachIndexed { index: Int, _ ->
-                if (index == 0 && (tempPayload.criteria.isNullOrBlank() && tempPayload.cond.isNullOrBlank() && tempPayload.value.isNullOrBlank())) {
-                    tempCriteria = "messageId"
-                    tempCond = "eq"
-                } else {
-                    tempCriteria += ",messageId"
-                    tempCond += ",eq"
-                }
+                tempPayload.criteria = criteria
+                tempPayload.cond = cond
+                tempPayload.value = value
             }
 
-            tempPayload.criteria = if (tempPayload.criteria.isNullOrBlank()) {
-                tempCriteria
-            } else {
-                tempPayload.criteria + tempCriteria
+            it.messageIds?.takeIf { it.isNotEmpty() }?.let { ids ->
+                val messageIdCriteria = "messageId"
+                val eqCond = "eq"
+                tempPayload.criteria =
+                    (tempPayload.criteria?.let { "$it," } ?: "") + ids.joinToString(",") { messageIdCriteria }
+                tempPayload.cond = (tempPayload.cond?.let { "$it," } ?: "") + ids.joinToString(",") { eqCond }
+                tempPayload.value = (tempPayload.value?.let { "$it," } ?: "") + ids.joinToString(",")
             }
-            tempPayload.cond = if (tempPayload.cond.isNullOrBlank()) {
-                tempCond
-            } else {
-                tempPayload.cond + tempCond
-            }
-            tempPayload.value = if (tempPayload.value.isNullOrBlank()) {
-                parameter.messageIds!!.joinToString(",")
-            } else {
-                tempPayload.value + "," + parameter.messageIds!!.joinToString(",")
-            }
-        }
 
-        // TODO: Refactor needed
-        if (!tempPayload.criteria.isNullOrBlank() && !tempPayload.cond.isNullOrBlank() && !tempPayload.value.isNullOrBlank()) {
-            parameter.to.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",to"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
+            listOf(
+                "to" to it.to,
+                "from" to it.from,
+                "messageId" to it.messageId,
+                "groupId" to it.groupId,
+                "type" to it.type,
+                "statusCode" to it.statusCode
+            ).forEach { (field, value) ->
+                addMessageListParameterToCriteria(tempPayload, field, value)
             }
-            parameter.from.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",from"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
-            }
-            parameter.messageId.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",messageId"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
-            }
-            parameter.groupId.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",groupId"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
-            }
-            parameter.type.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",type"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
-            }
-            parameter.statusCode.takeIf { !it.isNullOrBlank() }?.let {
-                tempPayload.criteria += ",statusCode"
-                tempPayload.cond += ",eq"
-                tempPayload.value += ",$it"
-            }
-        } else {
-            tempPayload.to = parameter.to
-            tempPayload.from = parameter.from
-            tempPayload.messageId = parameter.messageId
-            tempPayload.groupId = parameter.groupId
-            tempPayload.type = parameter.type
-        }
-        tempPayload.startKey = parameter.startKey
-        tempPayload.limit = parameter.limit
-        tempPayload.startDate = parameter.startDate
-        tempPayload.endDate = parameter.endDate
 
-        payload.putAll(MapHelper.toMap(tempPayload))
+            tempPayload.startKey = it.startKey
+            tempPayload.limit = it.limit
+            tempPayload.startDate = it.startDate
+            tempPayload.endDate = it.endDate
+
+            MapHelper.toMap(tempPayload)
+        } ?: emptyMap<String, Any>()
+
         val response = this.messageHttpService.getMessageList(payload).execute()
 
-        if (response.isSuccessful) {
-            return response.body()
+        return if (response.isSuccessful) {
+            response.body()
         } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
+            handleErrorResponse(response.errorBody()?.string())
         }
     }
 
     /**
-     * 단일 메시지 발송 API
-     * */
-    @Throws
-    fun sendOne(parameter: SingleMessageSendingRequest): SingleMessageSentResponse? {
-        val response = this.messageHttpService.sendOne(parameter).execute()
-
-        if (response.isSuccessful) {
-            return response.body()
-        } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            when (errorResponse.errorCode) {
-                "ValidationError" -> throw NurigoBadRequestException(errorResponse.errorMessage)
-                "InvalidApiKey" -> throw NurigoInvalidApiKeyException(errorResponse.errorMessage)
-                "FailedToAddMessage" -> throw NurigoBadRequestException(errorResponse.errorMessage)
-                else -> throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
-            }
-        }
-    }
-
-    /**
-     * 단일 메시지 발송 API
+     * 단일, 다중 메시지 발송 메소드
      * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
+     * SendRequestConfig 파라미터를 통해 예약발송, 중복 수신번호 허용, 메시지 리스트 표시 옵션을 활성화/비활성화 할 수 있습니다.
      */
+    @JvmOverloads
     @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(message: Message): MultipleDetailMessageSentResponse {
-        val multipleParameter = MultipleDetailMessageSendingRequest(
-            messages = listOf(message), scheduledDate = null
-        )
-
-        val response = this.messageHttpService.sendManyDetail(multipleParameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 단일 메시지 발송 및 다중 메시지(2건 이상) 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(message: Message, scheduledDateTime: java.time.Instant): MultipleDetailMessageSentResponse {
-        val multipleParameter = MultipleDetailMessageSendingRequest(
-            messages = listOf(message), scheduledDate = scheduledDateTime.toKotlinInstant()
-        )
-        val response = this.messageHttpService.sendManyDetail(multipleParameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 단일 메시지 발송 및 다중 메시지(2건 이상) 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(message: Message, scheduledDate: Instant): MultipleDetailMessageSentResponse {
-        val multipleParameter = MultipleDetailMessageSendingRequest(
-            messages = listOf(message), scheduledDate = scheduledDate
-        )
-
-        val response = this.messageHttpService.sendManyDetail(multipleParameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(messages: List<Message>): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, null
-        )
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(messages: List<Message>, allowDuplicates: Boolean): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, null
-        )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
+        SolapiMessageNotReceivedException::class, SolapiEmptyResponseException::class, SolapiUnknownException::class
     )
     fun send(
-        messages: List<Message>, allowDuplicates: Boolean, showMessageList: Boolean
+        message: Message,
+        sendRequestConfig: SendRequestConfig? = null,
     ): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages = messages,
-            scheduledDate = null,
-            showMessageList = showMessageList,
-        )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-
-    /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(messages: List<Message>, scheduledDateTime: java.time.Instant): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, scheduledDateTime.toKotlinInstant()
-        )
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
+        return send(listOf(message), sendRequestConfig)
     }
 
     /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
+     * 단일, 다중 메시지 발송 메소드
      * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
+     * SendRequestConfig 파라미터를 통해 예약발송, 중복 수신번호 허용, 메시지 리스트 표시 옵션을 활성화/비활성화 할 수 있습니다.
      */
+    @JvmOverloads
     @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(
-        messages: List<Message>, scheduledDateTime: java.time.Instant, allowDuplicates: Boolean
-    ): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, scheduledDateTime.toKotlinInstant()
-        )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
+        SolapiMessageNotReceivedException::class, SolapiEmptyResponseException::class, SolapiUnknownException::class
     )
     fun send(
         messages: List<Message>,
-        scheduledDateTime: java.time.Instant,
-        allowDuplicates: Boolean,
-        showMessageList: Boolean
+        sendRequestConfig: SendRequestConfig? = null,
     ): MultipleDetailMessageSentResponse {
+        if (messages.isEmpty()) {
+            throw SolapiBadRequestException("메시지가 1건 이상 등록되어야 합니다.")
+        }
+        if (messages.size > 10000) {
+            throw SolapiBadRequestException("10,000건 이상의 메시지는 한 번에 발송할 수 없습니다.")
+        }
+
         val parameter = MultipleDetailMessageSendingRequest(
-            messages = messages, scheduledDate = scheduledDateTime.toKotlinInstant(), showMessageList = showMessageList
+            messages = messages,
+            scheduledDate = sendRequestConfig?.scheduledDate,
+            showMessageList = sendRequestConfig?.showMessageList == true
         )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
+        if (sendRequestConfig?.allowDuplicates == true) {
+            parameter.allowDuplicates = true
         }
+        return processSendRequest(this.messageHttpService, parameter)
     }
 
     /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(
-        messages: List<Message>, scheduledDateTime: Instant, allowDuplicates: Boolean
-    ): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, scheduledDateTime
-        )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(
-        messages: List<Message>, scheduledDateTime: Instant, allowDuplicates: Boolean, showMessageList: Boolean
-    ): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages = messages, scheduledDate = scheduledDateTime, showMessageList = showMessageList
-        )
-        parameter.allowDuplicates = allowDuplicates
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 및 예약 발송 API
-     * sendOne 및 sendMany 보다 더 개선된 오류 및 데이터 정보를 반환합니다.
-     */
-    @Throws(
-        NurigoMessageNotReceivedException::class, NurigoEmptyResponseException::class, NurigoUnknownException::class
-    )
-    fun send(messages: List<Message>, scheduledDateTime: Instant): MultipleDetailMessageSentResponse {
-        val parameter = MultipleDetailMessageSendingRequest(
-            messages, scheduledDateTime
-        )
-        val response = this.messageHttpService.sendManyDetail(parameter).execute()
-
-        if (response.isSuccessful) {
-            val responseBody = response.body()
-            if (responseBody != null) {
-                val count: Count = responseBody.groupInfo?.count ?: Count()
-                val failedMessageList = responseBody.failedMessageList
-
-                if (failedMessageList.isNotEmpty() && count.total == failedMessageList.count()) {
-                    // TODO: i18n needed
-                    val messageNotReceivedException = NurigoMessageNotReceivedException("메시지 발송 접수에 실패했습니다.")
-                    messageNotReceivedException.failedMessageList = failedMessageList
-                    throw messageNotReceivedException
-                }
-
-                return responseBody
-            }
-            throw NurigoEmptyResponseException("서버로부터 아무 응답을 받지 못했습니다.")
-        } else {
-            val errorString = response.errorBody()?.string() ?: "Server error encountered"
-            throw NurigoUnknownException(errorString)
-        }
-    }
-
-    /**
-     * 다중 메시지(2건 이상) 발송 API
-     * @deprecated use Send method
-     * */
-    @Throws
-    fun sendMany(parameter: MultipleMessageSendingRequest): MultipleMessageSentResponse? {
-        val response = this.messageHttpService.sendMany(parameter).execute()
-
-        if (response.isSuccessful) {
-            return response.body()
-        } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            when (errorResponse.errorCode) {
-                "ValidationError" -> throw NurigoBadRequestException(errorResponse.errorMessage)
-                "InvalidApiKey" -> throw NurigoInvalidApiKeyException(errorResponse.errorMessage)
-                "FailedToAddMessage" -> throw NurigoBadRequestException(errorResponse.errorMessage)
-                else -> throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
-            }
-        }
-    }
-
-    /**
-     * 잔액 조회 API
+     * 잔액 조회 메소드
      */
     @Throws
     fun getBalance(): Balance {
         val response = this.messageHttpService.getBalance().execute()
-        if (response.isSuccessful) {
-            return response.body() ?: throw NurigoUnknownException("잔액 조회 데이터를 불러오지 못했습니다.")
-        } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
-        }
+        return handleApiResponse(response, "잔액 조회에 실패했습니다.")
     }
 
     /**
-     * 일일 발송량 한도 조회 API
+     * 일일 발송량 한도 조회 메소드
      */
     @Throws
     fun getQuota(): Quota {
         val response = this.messageHttpService.getQuota().execute()
-        if (response.isSuccessful) {
-            return response.body() ?: throw NurigoUnknownException("일일 발송량 조회에 실패하였습니다.")
-        } else {
-            val errorResponse: ErrorResponse = Json.decodeFromString(response.errorBody()?.string() ?: "")
-            throw NurigoUnknownException("${errorResponse.errorCode}: ${errorResponse.errorMessage}")
-        }
+        return handleApiResponse(response, "일일 발송량 조회에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 카테고리 조회 메소드
+     *
+     * 카카오 알림톡 템플릿을 생성하기 전에 해당 카테고리를 조회하신 다음, 조회한 값을 카카오 알림톡 템플릿 생성 메소드에 파라미터로 같이 넣어주셔야 합니다.
+     */
+    @Throws
+    fun getKakaoAlimtalkTemplateCategories(): List<KakaoAlimtalkTemplateCategory> {
+        val response = this.messageHttpService.getKakaoAlimtalkTemplateCategories().execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 카테고리 조회에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 생성 메소드
+     */
+    @Throws
+    fun createKakaoAlimtalkTemplate(parameter: KakaoAlimtalkTemplateMutationRequest): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.createKakaoAlimtalkTemplate(parameter).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 생성에 실패했습니다, 에러가 반복되는 경우 SOLAPI 측 관리자에게 문의해주세요.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 목록 조회 메소드
+     */
+    @Throws
+    @JvmOverloads
+    fun getKakaoAlimtalkTemplates(parameter: KakaoAlimtalkTemplateListRequest? = null): KakaoAlimtalkTemplateListResponse {
+        val queryParams = parameter?.generateQueryParams() ?: emptyMap()
+        val response = this.messageHttpService.getKakaoAlimtalkTemplates(queryParams).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 목록 조회에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 조회 메소드
+     *
+     * 카카오 알림톡 템플릿 조회 메소드를 호출 할 경우 해당 템플릿의 휴면 상태 또한 실시간으로 갱신됩니다. 만일 조회한 템플릿이 휴면 상태일 경우 휴면해지 요청 메소드를 통해 휴면 상태를 해지하실 수 있습니다.
+     * @see requestKakaoAlimtalkTemplateReactivation
+     */
+    @Throws
+    fun getKakaoAlimtalkTemplate(templateId: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.getKakaoAlimtalkTemplate(templateId).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 조회에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 휴면 해지요청 메소드
+     */
+    @Throws
+    fun requestKakaoAlimtalkTemplateReactivation(templateId: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.requestKakaoAlimtalkTemplateReactivation(templateId).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 휴면 해지요청에 실패했습니다.")
+    }
+
+    /**
+     * 발송 가능한 카카오 알림톡 템플릿 목록 조회 메소드
+     */
+    @Throws
+    @JvmOverloads
+    fun getSendableKakaoAlimtalkTemplates(parameter: KakaoAlimtalkSendableTemplateListRequest? = null): List<KakaoAlimtalkTemplateResponse> {
+        val queryParams = parameter?.generateToQueryParams() ?: emptyMap()
+        val response = this.messageHttpService.getSendableKakaoAlimtalkTemplates(queryParams).execute()
+        return handleApiResponse(response, "발송 가능한 카카오 알림톡 템플릿 목록 조회에 실패했습니다.")
+    }
+
+    @Throws
+    fun updateKakaoAlimtalkTemplate(templateId: String, parameter: KakaoAlimtalkTemplateMutationRequest): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.updateKakaoAlimtalkTemplate(templateId, parameter).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 수정에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 이름 수정 메소드
+     * 알림톡 템플릿의 이름은 다른 템플릿과 중복하여 사용할 수 있고, 승인완료 된 템플릿도 수정할 수 있습니다.
+     */
+    @Throws
+    fun updateKakaoAlimtalkTemplateName(templateId: String, name: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.updateKakaoAlimtalkTemplateName(templateId,
+            KakaoAlimtalkTemplateUpdateNameRequest(name)
+        ).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿의 이름 수정에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 검수 요청 메소드
+     */
+    @Throws
+    fun requestKakaoAlimtalkTemplateInspection(templateId: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.requestKakaoAlimtalkTemplateInspection(templateId).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 검수 요청에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 검수 취소 메소드
+     */
+    @Throws
+    fun cancelKakaoAlimtalkTemplateInspection(templateId: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.cancelKakaoAlimtalkTemplateInspection(templateId).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 검수 취소에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 알림톡 템플릿 삭제 메소드
+     */
+    @Throws
+    fun removeKakaoAlimtalkTemplate(templateId: String): KakaoAlimtalkTemplateResponse {
+        val response = this.messageHttpService.removeKakaoAlimtalkTemplate(templateId).execute()
+        return handleApiResponse(response, "카카오 알림톡 템플릿 삭제에 실패했습니다.")
+    }
+
+    /**
+     * 카카오 브랜드 메시지 템플릿 조회 메소드
+     */
+    @Throws
+    @JvmOverloads
+    fun getKakaoBrandMessageTemplates(parameter: KakaoBrandMessageTemplateListRequest? = null): KakaoBrandMessageTemplateListResponse {
+        val queryParams = parameter?.generateQueryParams() ?: emptyMap()
+        val response = this.messageHttpService.getKakaoBrandMessageTemplates(queryParams).execute()
+        return handleApiResponse(response, "카카오 브랜드 메시지 템플릿 조회에 실패했습니다.")
     }
 }

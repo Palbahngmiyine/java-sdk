@@ -3,8 +3,12 @@ package net.nurigo.sdk
 import net.nurigo.sdk.message.service.DefaultMessageService
 
 object NurigoApp {
-
-    fun initialize(apiKey: String, apiSecretKey: String, domain: String): DefaultMessageService {
-        return DefaultMessageService(apiKey, apiSecretKey, domain)
+    @Deprecated(
+        message = "This method will be removed in a future version",
+        replaceWith = ReplaceWith("SolapiClient.createInstance(apiKey, apiSecretKey)"),
+        level = DeprecationLevel.WARNING
+    )
+    fun initialize(apiKey: String, apiSecretKey: String, apiUrl: String): DefaultMessageService {
+        return DefaultMessageService(apiKey, apiSecretKey, apiUrl)
     }
 }

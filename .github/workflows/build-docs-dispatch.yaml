@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
     - name: Restore gradle.properties
       env:
         ACTIONS_ALLOW_UNSECURE_COMMANDS: true
@@ -24,12 +24,12 @@ jobs:
         echo "osspassword=${OSS_PASSWORD}" >> ./gradle.properties
     - name: Build
       run: |
-        sh ./gradlew dokkaHtml
+        sh ./gradlew dokkaGeneratePublicationHtml
     - name: Commit and push docs
       working-directory: ./
       run: |
-        git config --global user.email "wiley@nurigo.net"
-        git config --global user.name "Github Actions"
+        git config --global user.email "robot@solapi.com"
+        git config --global user.name "SOLAPI Robot"
         git add ./docs
         git commit -m "Update SDK API References"
         git push -u origin HEAD:main

@@ -6,7 +6,7 @@ class MapHelper {
 
     companion object {
         inline fun <reified T> toMap(obj: T): Map<String, Any?> {
-            return jsonObjectToMap(Json.encodeToJsonElement(obj).jsonObject)
+            return jsonObjectToMap(JsonSupport.json.encodeToJsonElement(obj).jsonObject)
         }
 
         fun jsonObjectToMap(element: JsonObject): Map<String, Any?> {

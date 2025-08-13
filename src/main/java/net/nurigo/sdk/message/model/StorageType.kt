@@ -4,5 +4,6 @@ enum class StorageType {
     KAKAO,
     MMS,
     DOCUMENT,
-    RCS
+    RCS,
+    FAX
 }
