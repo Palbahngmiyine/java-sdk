@@ -13,6 +13,7 @@ plugins {
     `java-library`
     `maven-publish`
     signing
+    id("com.vanniktech.maven.publish") version "0.34.0"
 }
 
 group = "net.nurigo"
@@ -20,6 +21,11 @@ version = "5.0.0"
 
 repositories {
     mavenCentral()
+}
+
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
 }
 
 dependencies {
@@ -111,14 +117,8 @@ tasks.withType<DokkaTaskPartial>().configureEach {
     outputDirectory.set(project.rootDir.resolve("docs"))
 }
 
-val dokkaJavadocJar by tasks.register<Jar>("dokkaJavadocJar") {
-    // v2 작업명에 의존
-    val genJavadoc = tasks.named("dokkaGeneratePublicationJavadoc", DokkaGeneratePublicationTask::class)
-    dependsOn(genJavadoc)
-
-    // v2 작업의 산출 디렉터리를 JAR에 포함
-    from(genJavadoc.flatMap { it.outputDirectory })
-    archiveClassifier.set("javadoc")
+tasks.withType<DokkaGeneratePublicationTask>().configureEach {
+    dependsOn(generateVersionFile)
 }
 
 val dokkaHtmlJar by tasks.register<Jar>("dokkaHtmlJar") {
@@ -128,23 +128,7 @@ val dokkaHtmlJar by tasks.register<Jar>("dokkaHtmlJar") {
     archiveClassifier.set("html-docs")
 }
 
-val ossusername: String by project
-val osspassword: String by project
-
 publishing {
-    repositories {
-        maven {
-            name = "oss"
-            val releasesRepoUrl = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
-            val snapshotsRepoUrl = "https://s01.oss.sonatype.org/content/repositories/snapshots/"
-            url = uri(if (version.toString().endsWith("SNAPSHOT")) snapshotsRepoUrl else releasesRepoUrl)
-
-            credentials {
-                username = ossusername
-                password = osspassword
-            }
-        }
-    }
     publications {
         create<MavenPublication>("mavenJava") {
             groupId = group.toString()
@@ -154,7 +138,7 @@ publishing {
             from(components["shadow"])
 
             artifact(tasks.named("sourcesJar"))
-            artifact(dokkaJavadocJar)
+            artifact(tasks.named("javadocJar"))
 
             pom {
                 name.set("SOLAPI SDK")
@@ -194,6 +178,4 @@ publishing {
     }
 }
 
-signing {
-    sign(publishing.publications)
-}
+
